@@ -34,7 +34,10 @@ solve.run({ text: warmText, header: false });
 const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
 const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
 
-const cases = JSON.parse(readFileSync(join(inputDir, 'cases.json'), 'utf8')) as {
+// The cases file is read as bytes and decoded in one explicit step: timed
+// through the whole process, that measured faster than the 'utf8'
+// convenience form of readFileSync.
+const cases = JSON.parse(readFileSync(join(inputDir, 'cases.json')).toString('utf8')) as {
   id: string;
   input: unknown;
 }[];

@@ -29,7 +29,10 @@
 // characters and is likewise one slice whenever its body holds neither a
 // doubled quote nor a CR. Only the genuinely tangled fields (stray CRs,
 // escapes, CRs inside quotes) are assembled from segment slices, and only
-// then. No dependencies, no state between calls.
+// then. The scanners hand their field back through shared slots (fValue,
+// fEnded, fKept) instead of a fresh result object per field — a set holds
+// hundreds of thousands of fields, and the object per field was pure
+// allocation overhead. No dependencies, no state between calls.
 
 /** How a field ended: 0 at a comma, 1 at a line break, 2 at the end of text. */
 const AT_COMMA = 0;
@@ -62,12 +65,17 @@ export function run(input) {
   let recordLine = 1;
   let recordRow = null;
 
+  // The field the scanners just read: its value, how it ended, and how many
+  // characters were kept past the prefix (the quote_junk test reads fKept).
+  let fValue = '';
+  let fEnded = AT_END;
+  let fKept = 0;
+
   // Reads an unquoted stretch starting at pos, on top of `prefix` ('' for an
   // ordinary field, the opening quote for a re-read, the quoted body for junk
   // after a closing quote). Stops at the first comma or line break. A CR that
   // is not part of a CRLF is dropped and reported; the kept text is then
-  // assembled from the slices between those drops. Returns the field value,
-  // how it ended, and how many characters were kept past the prefix.
+  // assembled from the slices between those drops.
   function scanPlain(prefix) {
     let parts = null; // segment slices, allocated only once a stray CR splits the field
     let segFrom = pos;
@@ -82,26 +90,47 @@ export function run(input) {
       if (i >= len) {
         kept += len - segFrom;
         pos = len;
-        if (parts === null) return { value: prefix + text.slice(segFrom, len), ended: AT_END, kept };
+        fKept = kept;
+        if (parts === null) {
+          fValue = prefix === '' ? text.slice(segFrom, len) : prefix + text.slice(segFrom, len);
+          fEnded = AT_END;
+          return;
+        }
         parts.push(text.slice(segFrom, len));
-        return { value: parts.join(''), ended: AT_END, kept };
+        fValue = parts.join('');
+        fEnded = AT_END;
+        return;
       }
       const c = text.charCodeAt(i);
       if (c === CH_COMMA) {
         kept += i - segFrom;
         pos = i + 1;
-        if (parts === null) return { value: prefix + text.slice(segFrom, i), ended: AT_COMMA, kept };
+        fKept = kept;
+        if (parts === null) {
+          fValue = prefix === '' ? text.slice(segFrom, i) : prefix + text.slice(segFrom, i);
+          fEnded = AT_COMMA;
+          return;
+        }
         parts.push(text.slice(segFrom, i));
-        return { value: parts.join(''), ended: AT_COMMA, kept };
+        fValue = parts.join('');
+        fEnded = AT_COMMA;
+        return;
       }
       if (c === CH_LF || (i + 1 < len && text.charCodeAt(i + 1) === CH_LF)) {
         // LF, or CRLF: either way the record ends and one line is counted.
         kept += i - segFrom;
         pos = i + (c === CH_LF ? 1 : 2);
         line += 1;
-        if (parts === null) return { value: prefix + text.slice(segFrom, i), ended: AT_BREAK, kept };
+        fKept = kept;
+        if (parts === null) {
+          fValue = prefix === '' ? text.slice(segFrom, i) : prefix + text.slice(segFrom, i);
+          fEnded = AT_BREAK;
+          return;
+        }
         parts.push(text.slice(segFrom, i));
-        return { value: parts.join(''), ended: AT_BREAK, kept };
+        fValue = parts.join('');
+        fEnded = AT_BREAK;
+        return;
       }
       // A CR with no LF after it: dropped, reported, reading goes on.
       if (parts === null) parts = [prefix + text.slice(segFrom, i)];
@@ -136,7 +165,8 @@ export function run(input) {
       // field is read again as unquoted text.
       errors.push({ code: 'unterminated_quote', line: recordLine, row: recordRow });
       pos = bodyFrom;
-      return scanPlain('"');
+      scanPlain('"');
+      return;
     }
     const crAt = text.indexOf('\r', bodyFrom);
     let value;
@@ -178,26 +208,35 @@ export function run(input) {
       value = parts.join('');
     }
     pos = close + 1;
-    if (pos >= len) return { value, ended: AT_END };
+    if (pos >= len) {
+      fValue = value;
+      fEnded = AT_END;
+      return;
+    }
     const c = text.charCodeAt(pos);
     if (c === CH_COMMA) {
       pos += 1;
-      return { value, ended: AT_COMMA };
+      fValue = value;
+      fEnded = AT_COMMA;
+      return;
     }
     if (c === CH_LF) {
       pos += 1;
       line += 1;
-      return { value, ended: AT_BREAK };
+      fValue = value;
+      fEnded = AT_BREAK;
+      return;
     }
     if (c === CH_CR && pos + 1 < len && text.charCodeAt(pos + 1) === CH_LF) {
       pos += 2;
       line += 1;
-      return { value, ended: AT_BREAK };
+      fValue = value;
+      fEnded = AT_BREAK;
+      return;
     }
     // Anything else after the closing quote is glued on as it stands.
-    const glued = scanPlain(value);
-    if (glued.kept > 0) errors.push({ code: 'quote_junk', line: recordLine, row: recordRow });
-    return glued;
+    scanPlain(value);
+    if (fKept > 0) errors.push({ code: 'quote_junk', line: recordLine, row: recordRow });
   }
 
   for (;;) {
@@ -219,13 +258,13 @@ export function run(input) {
     recordLine = line;
     recordRow = header && columns === null ? null : rows.length;
     const fields = [];
-    let field;
     let quoted = false;
     do {
       quoted = pos < len && text.charCodeAt(pos) === CH_QUOTE;
-      field = quoted ? scanQuoted() : scanPlain('');
-      fields.push(field.value);
-    } while (field.ended === AT_COMMA);
+      if (quoted) scanQuoted();
+      else scanPlain('');
+      fields.push(fValue);
+    } while (fEnded === AT_COMMA);
 
     // A line that held nothing but dropped CRs is no record either; the
     // errors it raised stay.
