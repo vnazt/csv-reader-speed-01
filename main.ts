@@ -25,5 +25,8 @@ const cases = JSON.parse(readFileSync(join(inputDir, 'cases.json'), 'utf8')) as 
   input: unknown;
 }[];
 
-const answers = cases.map((c) => solve.run(c.input));
+// Answer each case alone, in order, into a preallocated array: no case's work
+// may leak into another's, and the array's shape is fixed before the loop runs.
+const answers: unknown[] = new Array(cases.length);
+for (let i = 0; i < cases.length; i++) answers[i] = solve.run(cases[i]!.input);
 writeFileSync(join(outputDir, 'answers.json'), JSON.stringify(answers));
